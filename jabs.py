@@ -48,6 +48,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 import os
 import re
 import sys
+import gzip
 import psutil
 import socket
 import getpass
@@ -55,8 +56,25 @@ import logging
 import datetime
 import subprocess
 import collections
-import configparser
+import threading
+from email.mime.application import MIMEApplication
+from __future__ import print_function
 
+def minPythonVersion(major, minor):
+	"""
+		Returns true if current python version is equal or more recent than
+		given one
+	"""
+	if sys.version_info[0] > major:
+		return True
+	if sys.version_info[0] == major and sys.version_info[1] >= minor:
+		return True
+	return False
+
+if minPythonVersion(3, 0):
+	import configparser
+else:
+	import ConfigParser as configparser
 
 NAME = 'jabs'
 VERSION = '2.0-pre-aplha'
@@ -76,6 +94,53 @@ class CannotLockError(Exception):
 	''' Exception raised when lock couldn't be acquired '''
 	pass
 
+
+class SubProcessCommThread(threading.Thread):
+	""" Base subprocess communication thread class """
+
+	def __init__(self, sp, stream):
+		"""
+			@param sp: The POpen subproces object
+			@param stream: The sp's stream to read from
+		"""
+		assert stream == sp.stderr or stream == sp.stdout
+		super(SubProcessCommThread, self).__init__()
+		self.daemon = True
+		self.sp = sp
+		self._stream = stream
+
+	def run(self):
+		while True:
+			text = file.readline(self._stream)
+			if text == '':
+				break
+			self._processText(text)
+
+
+class SubProcessCommStdoutThread(SubProcessCommThread):
+	""" Handles stdout communication with the rsync/tar subprocess """
+
+	def __init__(self, sp, logh):
+		"""
+			@param logh: The logfile handle where to send stdout
+		"""
+		super(SubProcessCommStdoutThread, self).__init__(sp, sp.stdout)
+		self.logh = logh
+
+	def _processText(self, text):
+		self.logh.write(text)
+		self.logh.flush()
+
+
+class SubProcessCommStderrThread(SubProcessCommThread):
+	""" Handles stderr communication with the rsync/tar subprocess """
+
+	def __init__(self, sp):
+		super(SubProcessCommStderrThread, self).__init__(sp, sp.stderr)
+		self.output = ''
+
+	def _processText(self, text):
+		self.output += text
 
 class BackupSet:
 	''' Represents a single backup set '''
@@ -139,6 +204,12 @@ class BackupSet:
 		self.pre = config.getStr('PRE', [], True)
 		## Whether to skip the backup if a pre-task fails
 		self.skipOnPreError = config.getBool('SKIPONPREERROR', True)
+		## Email server connection data
+		self.smtphost = config.getstr('SMTPHOST', self.name, None)
+		self.smtpuser = config.getstr('SMTPUSER', self.name, None)
+		self.smtppass = config.getstr('SMTPPASS', self.name, None)
+		## Compress logs
+		self.compresslog = config.getstr('COMPRESSLOG', self.name, True)
 
 		# Validate the ping setting, replace it with the hostname
 		if not ping:
