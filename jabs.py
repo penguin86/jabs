@@ -45,6 +45,7 @@ You should have received a copy of the GNU General Public License
 along with this program. If not, see <http://www.gnu.org/licenses/>.
 """
 
+from __future__ import print_function
 import os
 import re
 import sys
@@ -57,24 +58,12 @@ import datetime
 import subprocess
 import collections
 import threading
+import tempfile
+import shutil
+from time import sleep, mktime
 from email.mime.application import MIMEApplication
-from __future__ import print_function
-
-def minPythonVersion(major, minor):
-	"""
-		Returns true if current python version is equal or more recent than
-		given one
-	"""
-	if sys.version_info[0] > major:
-		return True
-	if sys.version_info[0] == major and sys.version_info[1] >= minor:
-		return True
-	return False
-
-if minPythonVersion(3, 0):
-	import configparser
-else:
-	import ConfigParser as configparser
+from stat import S_ISDIR, S_ISLNK, ST_MODE
+import configparser
 
 NAME = 'jabs'
 VERSION = '2.0-pre-aplha'
@@ -85,6 +74,83 @@ DEFAULT_CONFIG = {
 	'cachedir': '/var/cache/jabs',
 }
 
+# class JabsMailer():
+# 	def __init__(self, bckSet):
+# 		self.s = bckSet
+# 		self.logger = logging.getLogger('jabs.mailer')
+
+# 	# Sends the "Backup has started" email
+# 	def sendStartedEmail(self):
+# 		subject = "Starting backup of " + self.s.name
+# 		body = "Backup of " + self.s.name + " started at " + datetime.datetime.now().ctime()
+# 		return self.sendMail(subject, body, [])
+
+# 	# Sends the "Backup finished" email
+# 	def sendCompletedEmail(self, logsFiles, success):
+# 		# Subject
+# 		if success:
+# 			i = "OK"
+# 		else:
+# 			i = "FAILED"
+# 		subject = "Backup of " + self.s.name + " " + i
+# 		# Body (from logs)
+# 		body = emailLogStream.getvalue() + "\n\nDetailed logs are attached.\n"
+# 		return self.sendMail(subject, body, logsFiles)
+
+# 	# Sends a mail
+# 	def sendMail(self, subject, body, attachments):
+# 		if not self.s.mailto:
+# 			return
+
+# 		if options.safe:
+# 			self.logger.info("Skipping sending detailed logs to %s", self.s.mailto)
+# 		else:
+# 			if self.s.smtphost:
+# 				self.logger.info("Sending detailed logs to %s via  %s", self.s.mailto, self.s.smtphost)
+# 			else:
+# 				self.logger.info("Sending detailed logs to %s using local smtp", self.s.mailto)
+
+# 			# Create main message
+# 			msg = MIMEMultipart()
+# 			msg['Subject'] = subject
+# 			if self.s.mailfrom:
+# 				m_from = self.s.mailfrom
+# 			else:
+# 				m_from = username + "@" + hostname
+# 			msg['From'] = m_from
+# 			msg['To'] = ', '.join(self.s.mailto)
+# 			msg.preamble = 'This is a multi-part message in MIME format.'
+
+# 			# Add base text
+# 			txt = MIMEText(body)
+# 			msg.attach(txt)
+
+# 			# Add attachments
+# 			for tl in attachments:
+# 				if tl:
+# 					TL = open(tl, 'rb')
+# 					if self.s.compresslog:
+# 						att = MIMEApplication(TL.read(),'gzip')
+# 					else:
+# 						att = MIMEText(TL.read(),'plain','utf-8')
+# 					TL.close()
+# 					att.add_header(
+# 						'Content-Disposition',
+# 						'attachment',
+# 						filename=os.path.basename(tl)
+# 					)
+# 					msg.attach(att)
+
+# 			# Send the message
+# 			smtp = smtplib.SMTP(timeout=300)
+# 			if self.s.smtphost:
+# 				smtp.connect(s.smtphost)
+# 			else:
+# 				smtp.connect()
+# 			if self.s.smtpuser or self.s.smtppass:
+# 				smtp.login(s.smtpuser, self.s.smtppass)
+# 			smtp.sendmail(m_from, self.s.mailto, msg.as_string())
+# 			smtp.quit()
 
 class ConfigurationError(Exception):
 	''' Simple exception raised when there is a configuration error '''
@@ -147,11 +213,22 @@ class BackupSet:
 
 	# Time interval representing whole day
 	ALLDAY = ( datetime.time(0,0,0), datetime.time(23,59,59) )
+	# Regex
+	RPAT = re.compile('{setname}')
+	RDIR = re.compile('{dirname}')
+	RISREMOTE = re.compile('(.*@.*):{1,2}(.*)')
+	RLSPARSER = re.compile('^([^\s]+)\s+([0-9]+)\s+([^\s]+)\s+([^\s]+)\s+([0-9]+)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}\s[0-9]{2}:[0-9]{2})\s+(.+)$')
 
-	def __init__(self, name, config):
+	def __init__(self, name, config, startTime):
 		''' Reads the config section and inits the backup set
+		@params name Backupset name
+		@params config Configuration obtained from config file
+		@params startTime Start time of the entire set
 		@throws ConfigurationError
 		'''
+		self.logger = logging.getLogger('jabs.backupset')
+		self.startTime = startTime
+
 		self.name = name
 
 		## List of folders to be backed up
@@ -210,6 +287,9 @@ class BackupSet:
 		self.smtppass = config.getstr('SMTPPASS', self.name, None)
 		## Compress logs
 		self.compresslog = config.getstr('COMPRESSLOG', self.name, True)
+		## Remove source/dest
+		self.remsrc = self.RISREMOTE.match(self.src)
+		self.remdst = self.RISREMOTE.match(self.dst)
 
 		# Validate the ping setting, replace it with the hostname
 		if not ping:
@@ -229,13 +309,293 @@ class BackupSet:
 				raise ConfigurationError('Ping is enabled but both src and dst are local. '
 						'I do not know what to ping')
 
-
 	def __str__(self):
 		desc = 'Backup Set "{}":'.format(self.name)
 		exclude = ('name')
 		for k, v in sorted(self.__dict__.items()):
 			desc += "\n- {}: {}".format(k, v)
 		return desc
+
+	def run(self, safe, cachedir):
+		# Setup mailer
+		#mailer = JabsMailer(self)
+		#mailer.sendStartedEmail()
+
+		sstarttime = datetime.datetime.now()
+
+		if self.mount:
+			if os.path.ismount(self.mount):
+				self.logger.warning("Skipping mount of %s because it's already mounted", self.mount)
+			else:
+				# Mount specified location
+				cmd = ["mount", self.mount ]
+				self.logger.info("Mounting %s", self.mount)
+				p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+				stdout, stderr = p.communicate()
+				ret = p.poll()
+				if ret != 0:
+					self.logger.warning("Mount of %s failed with return code %s", self.mount, ret)
+
+		# Put a file cointaining backup date on dest dir
+		tmpdir = tempfile.mkdtemp()
+		tmpfile = None
+		if self.dateFile:
+			if safe:
+				self.logger.info("Skipping creation of datefile %s", self.dateFile)
+			else:
+				tmpfile = tmpdir + "/" + self.dateFile
+				self.logger.info("Generating datefile %s", tmpfile)
+				TMPFILE = open(tmpfile,"w")
+				TMPFILE.write(str(datetime.datetime.now())+"\n")
+				TMPFILE.close()
+				self.backupList.append(tmpfile)
+
+		# Calculate curret hanoi day and suffix to use
+		hanoisuf = ""
+		if self.hanoi > 0:
+			today = (self.startTime.date() - self.hanoiDay).days + 1
+			i = self.hanoi
+			while i >= 0:
+				if today % 2 ** i == 0:
+					hanoisuf = chr(i+65)
+					break
+				i -= 1
+			self.logger.debug("First hanoi day: %s", self.hanoiDay)
+			self.logger.info("Hanoi sets to use: %s", self.hanoi)
+			self.logger.info("Today is hanoi day %s - using suffix: %s", today, hanoisuf)
+
+		plink = []
+		if self.hardLink:
+			# Seek for most recent backup set to hard link
+			if self.remdst:
+				#Backing up to a remote path
+				(path, base) = os.path.split(self.remdst.group(2))
+				self.logger.debug("Backing up to remote path: %s %s", self.remdst.group(1), self.remdst.group(2))
+				cmd = ["ssh", "-o", "BatchMode=true", self.remdst.group(1), "ls -l --color=never --time-style=long-iso -t -1 \"" + path + "\"" ]
+				self.logger.info("Issuing remote command: %s", cmd)
+				p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+				stdout, stderr = p.communicate()
+				self.logger.info("Subprocess return code: %s", p.poll())
+				if len(stderr):
+					self.logger.warning("stderr was not empty: %s", stderr)
+				files = stdout.split('\n')
+				psets = []
+				for f in files:
+					m = self.RLSPARSER.match(f)
+					# If file matched regexp and is a directory
+					if m and m.group(1)[0] == "d":
+						btime = datetime.datetime.strptime(m.group(6),"%Y-%m-%d %H:%M")
+						psets.append([m.group(7),btime])
+			else:
+				(path, base) = os.path.split(self.dst)
+				dirs = os.listdir(path)
+				psets = []
+				for d in dirs:
+					if ( d == base or d[:len(base)] + self.sep == base + self.sep ) and S_ISDIR(os.lstat(path+"/"+d)[ST_MODE]):
+						btime = datetime.datetime.fromtimestamp(os.stat(path+"/"+d).st_mtime)
+						psets.append([d,btime])
+				psets = sorted(psets, key=lambda pset: pset[1], reverse=True) #Sort by age
+
+			for p in psets:
+				self.logger.debug("Found previous backup: %s (%s)", p[0], p[1])
+				if p[0] != base + self.sep + hanoisuf:
+					plink.append(path + "/" + p[0])
+
+			if len(plink):
+				self.logger.info("Will hard link against %s", plink)
+			else:
+				self.logger.info("Will NOT use hard linking (no suitable set found)")
+
+		else:
+			self.logger.info("Will NOT use hark linking (disabled)")
+
+		tarlogs = []
+		setsuccess = True
+
+		if self.pre:
+			# Pre-backup tasks
+			goon = False
+			for p in self.pre:
+				self.logger.info("Running pre-backup task: %s" % p)
+				ret = subprocess.call(p, shell=True)
+				if ret != 0:
+					self.logger.error("%s failed with return code %i" % (p, ret))
+					setsuccess=False
+					if self.skipOnPreError:
+						self.logger.error("Skipping %s set, SKIPONPREERROR is set.", self.name)
+						break
+			else:
+				goon = True
+			if not goon:
+				return
+
+		if self.checkdst:
+			# Checks whether the given backup destination exists
+			try:
+				i = os.path.exists(self.dst)
+				if not i:
+					self.logger.warning("Skipping %s set, destination %s not found.", self.name, self.dst)
+					return
+			except:
+				self.logger.warning("Skipping %s set, read error on %s.", self.name, self.dst)
+				return
+
+		for d in self.backupList:
+			self.logger.info("Backing up %s on %s...", d, self.name)
+			tarlogfile = None
+			if self.mailto:
+				tarlogfile = tmpdir + '/' + re.sub(r'(\/|\.)', '_', self.name + '-' + d) + '.log'
+				if self.compresslog:
+					tarlogfile += '.gz'
+			if not safe:
+				tarlogs.append(tarlogfile)
+
+			#Build command line
+			cmd, cmdi, cmdn, cmdr = ([] for x in range(4))
+			cmdi.extend(["ionice", "-c", str(self.ioNice)])
+			cmdn.extend(["nice", "-n", str(self.nice)])
+			cmdr.append("rsync")
+			cmdr.extend(map(lambda x: self.RPAT.sub(self.name.lower(),x), self.rsyncOpts))
+			for pl in plink:
+				cmdr.append("--link-dest=" + pl )
+			if tmpfile and d == tmpfile:
+				cmdr.append(tmpfile)
+			else:
+				cmdr.append(self.RDIR.sub(d, self.src))
+			cmdr.append(self.RDIR.sub(d, self.dst + (self.sep+hanoisuf if len(hanoisuf)>0 else "") ))
+
+			if self.ioNice != 0:
+				cmd.extend(cmdi)
+			if self.nice != 0:
+				cmd.extend(cmdn)
+			cmd.extend(cmdr)
+
+			if safe:
+				self.logger.info("Commandline: %s", cmd)
+			else:
+				self.logger.debug("Commandline: %s", cmd)
+			self.logger.debug("Will write tar STDOUT to %s", tarlogfile)
+
+			if not safe:
+				# Execute the backup
+				sys.stdout.flush()
+				if self.compresslog:
+					TARLOGFILE = gzip.open(tarlogfile, 'wb')
+				else:
+					TARLOGFILE = open(tarlogfile, 'wb')
+				try:
+					p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1)
+				except OSError as e:
+					self.logger.error("Unable to locate file %s", e.filename)
+					self.logger.error("Path: %s", os.environ['PATH'])
+					sys.exit(1)
+				spoct = SubProcessCommStdoutThread(p, TARLOGFILE)
+				spect = SubProcessCommStderrThread(p)
+				spoct.start()
+				spect.start()
+				ret = p.wait()
+				spoct.join()
+				spect.join()
+				TARLOGFILE.close()
+				if ret != 0:
+					setsuccess = False
+				self.logger.info("Done. Exit status: %s", ret)
+
+				# Analyze STDERR
+				if len(spect.output):
+					badoutput = False
+					for line in spect.output.splitlines():
+						if '(will try again)' in line:
+							continue
+						badoutput = True
+						break
+					if badoutput:
+						setsuccess = False
+						self.logger.error("stderr was not empty: %s", spect.output)
+					else:
+						self.logger.warning("stderr was not empty (but no errors detected): %s", spect.output)
+
+			if self.sleep > 0:
+				if safe:
+					self.logger.info("Should sleep %d secs now, skipping.", self.sleep)
+				else:
+					self.logger.info("Sleeping %d secs", self.sleep)
+					sleep(self.sleep)
+
+		# Delete dirs from deletelist
+		for d in self.deleteList:
+			deldest = self.dst + (self.sep+hanoisuf if len(hanoisuf)>0 else "") + os.sep + d
+			if os.path.exists(deldest) and os.path.isdir(deldest):
+				self.logger.info('DELETING folder in deletelist %s' % deldest)
+				shutil.rmtree(deldest)
+
+		# Save last backup execution time
+		if self.interval and self.interval > datetime.timedelta(seconds=0):
+			if safe:
+				self.logger.info("Skipping write of last backup timestamp")
+			else:
+				self.logger.debug("Writing last backup timestamp")
+
+				# Create cachedir if missing
+				if not os.path.exists(cachedir):
+					# 448 corresponds to octal 0700 and is both python 2 and 3 compatible
+					os.makedirs(cachedir, 448)
+
+				cachefile = cachedir + os.sep + self.name
+				CACHEFILE = open(cachefile,'w')
+				CACHEFILE.write(str(int(mktime(self.startTime.timetuple())))+"\n")
+				CACHEFILE.close()
+
+		# Create backup symlink, is using hanoi and not remote
+		if len(hanoisuf)>0 and not self.remdst:
+			if os.path.exists(self.dst) and S_ISLNK(os.lstat(self.dst)[ST_MODE]):
+				if safe:
+					self.logger.info("Skipping deletion of old symlink %s", self.dst)
+				else:
+					self.logger.info("Deleting old symlink %s", self.dst)
+					os.unlink(self.dst)
+			if not os.path.exists(self.dst):
+				if safe:
+					self.logger.info("Skipping creation of symlink %s to %s", self.dst, self.dst+self.sep+hanoisuf)
+				else:
+					self.logger.info("Creating symlink %s to %s", self.dst, self.dst+self.sep+hanoisuf)
+					os.symlink(self.dst+self.sep+hanoisuf, self.dst)
+			elif not safe:
+				self.logger.warning("Can't create symlink %s a file with such name exists", self.dst)
+
+		stooktime = datetime.datetime.now() - sstarttime
+		self.logger.info("Set %s completed. Took: %s", self.name, stooktime)
+
+		# Umount
+		if self.umount:
+			if not os.path.ismount(self.umount):
+				self.logger.warning("Skipping umount of %s because it's not mounted", self.umount)
+			else:
+				# Umount specified location
+				cmd = ["umount", self.umount ]
+				self.logger.info("Umounting %s", self.umount)
+				p = subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+				stdout, stderr = p.communicate()
+				ret = p.poll()
+				if ret != 0:
+					self.logger.warning("Umount of %s failed with return code %s", self.umount, ret)
+
+		# Send backup completed email
+		#mailer.sendCompletedEmail(tarlogs)
+
+		# Delete temporary logs, if any
+		for tl in tarlogs:
+			if tl:
+				self.logger.debug("Deleting log file %s", tl)
+				os.unlink(tl)
+		tarlogs = []
+
+		# Delete tmpfile, if created
+		if tmpfile and len(tmpfile):
+			self.logger.info("Deleting temporary files %s")
+			os.unlink(tmpfile)
+		if tmpdir:
+			os.rmdir(tmpdir)
 
 
 class Jabs:
@@ -269,6 +629,9 @@ class Jabs:
 		except KeyError:
 			raise ConfigurationError("{} section must define a ConfigVersion=2 parameter".format(self.GLOBAL_CONFIG_SECTION))
 
+
+		startTime = datetime.datetime.now()
+
 		# Loads sets (except disabled ones)
 		sets = collections.OrderedDict()
 		for name in self.config.sections():
@@ -278,7 +641,7 @@ class Jabs:
 			if name in sets.keys():
 				raise ConfigurationError('Duplicate definition for set "{}"'.format(name))
 
-			s = BackupSet(name, ConfigSection(self.config, name))
+			s = BackupSet(name, ConfigSection(self.config, name), startTime)
 			self.log.debug('Loaded set: {}'.format(s))
 			sets[s.name] = s
 
@@ -562,7 +925,7 @@ class PidFile:
 
 	def __init__(self, path):
 		self.path = path
-		self.log = logging.getLogger('pid')
+		self.log = logging.getLogger('jabs.pid')
 		self.locked = False
 
 	def lock(self):
