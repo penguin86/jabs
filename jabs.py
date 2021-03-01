@@ -61,9 +61,14 @@ import threading
 import tempfile
 import shutil
 from time import sleep, mktime
+import email
+from email.mime.multipart import MIMEMultipart
 from email.mime.application import MIMEApplication
+from email.mime.text import MIMEText
+import smtplib
 from stat import S_ISDIR, S_ISLNK, ST_MODE
 import configparser
+from io import StringIO
 
 NAME = 'jabs'
 VERSION = '2.0-pre-aplha'
@@ -75,83 +80,106 @@ DEFAULT_CONFIG = {
 	'cachedir': '/var/cache/jabs',
 }
 
-# class JabsMailer():
-# 	def __init__(self, bckSet):
-# 		self.s = bckSet
-# 		self.logger = logging.getLogger('jabs.mailer')
+class JabsMailer():
+	def __init__(self, backupSet):
+		"""
+			@param safe Wether this is a safe run (e.g. a simulation run that doesn't write to disk)
+			@param username The smtp username
+			@param hostname The smtp hostname
+			@param backupSetLogger The backup set logger
+		"""
+		self.s = backupSet
+		self.mailLogger = logging.getLogger('jabs.mailer')
 
-# 	# Sends the "Backup has started" email
-# 	def sendStartedEmail(self):
-# 		subject = "Starting backup of " + self.s.name
-# 		body = "Backup of " + self.s.name + " started at " + datetime.datetime.now().ctime()
-# 		return self.sendMail(subject, body, [])
+		# Email log handler (not using SMTPHandler because sends a mail for every log entry)
+		self.emailLogStream = StringIO()
+		emailStreamHandler = logging.StreamHandler(self.emailLogStream)
+		logEmailFormatter = logging.Formatter('%(message)s')
+		emailStreamHandler.setFormatter(logEmailFormatter)
+		emailStreamHandler.setLevel(logging.INFO)
+		# Attach our handler to backup set's logger
+		self.s.logger.addHandler(emailStreamHandler)
 
-# 	# Sends the "Backup finished" email
-# 	def sendCompletedEmail(self, logsFiles, success):
-# 		# Subject
-# 		if success:
-# 			i = "OK"
-# 		else:
-# 			i = "FAILED"
-# 		subject = "Backup of " + self.s.name + " " + i
-# 		# Body (from logs)
-# 		body = emailLogStream.getvalue() + "\n\nDetailed logs are attached.\n"
-# 		return self.sendMail(subject, body, logsFiles)
+	# Sends the "Backup has started" email
+	def sendStartedEmail(self):
+		"""
+			@param s BackupSet the backupset originating this mail
+		"""
+		subject = "Backup of " + self.s.name + " STARTED"
+		body = "Backup of " + self.s.name + " started at " + datetime.datetime.now().ctime()
+		return self.sendMail(subject, body, [])
 
-# 	# Sends a mail
-# 	def sendMail(self, subject, body, attachments):
-# 		if not self.s.mailto:
-# 			return
+	# Sends the "Backup finished" email
+	def sendCompletedEmail(self, logsFiles, success):
+		"""
+			@param s BackupSet the backupset originating this mail
+			@param logsFiles Paths of the log files to be attached
+			@param success Wether the backup completed successfully
+		"""
+		# Subject
+		if success:
+			i = "OK"
+		else:
+			i = "FAILED"
+		subject = "Backup of " + self.s.name + " " + i
+		# Body (from logs)
+		body = self.emailLogStream.getvalue() + "\n\nDetailed logs are attached.\n"
+		return self.sendMail(subject, body, logsFiles)
 
-# 		if options.safe:
-# 			self.logger.info("Skipping sending detailed logs to %s", self.s.mailto)
-# 		else:
-# 			if self.s.smtphost:
-# 				self.logger.info("Sending detailed logs to %s via  %s", self.s.mailto, self.s.smtphost)
-# 			else:
-# 				self.logger.info("Sending detailed logs to %s using local smtp", self.s.mailto)
+	# Sends a mail
+	def sendMail(self, subject, body, attachments):
+		if not self.s.mailto:
+			return
 
-# 			# Create main message
-# 			msg = MIMEMultipart()
-# 			msg['Subject'] = subject
-# 			if self.s.mailfrom:
-# 				m_from = self.s.mailfrom
-# 			else:
-# 				m_from = username + "@" + hostname
-# 			msg['From'] = m_from
-# 			msg['To'] = ', '.join(self.s.mailto)
-# 			msg.preamble = 'This is a multi-part message in MIME format.'
+		if self.s.safe:
+			self.mailLogger.info("Skipping sending detailed logs to %s", self.s.mailto)
+		else:
+			if self.s.smtphost:
+				self.mailLogger.info("Sending detailed logs to %s via  %s", self.s.mailto, self.s.smtphost)
+			else:
+				self.mailLogger.info("Sending detailed logs to %s using local smtp", self.s.mailto)
 
-# 			# Add base text
-# 			txt = MIMEText(body)
-# 			msg.attach(txt)
+			# Create main message
+			msg = email.mime.multipart.MIMEMultipart()
+			msg['Subject'] = subject
+			if self.s.mailfrom:
+				m_from = self.s.mailfrom
+			else:
+				m_from = self.s.username + "@" + self.s.hostname
+			msg['From'] = m_from
+			msg['To'] = ', '.join(self.s.mailto)
+			msg.preamble = 'This is a multi-part message in MIME format.'
 
-# 			# Add attachments
-# 			for tl in attachments:
-# 				if tl:
-# 					TL = open(tl, 'rb')
-# 					if self.s.compresslog:
-# 						att = MIMEApplication(TL.read(),'gzip')
-# 					else:
-# 						att = MIMEText(TL.read(),'plain','utf-8')
-# 					TL.close()
-# 					att.add_header(
-# 						'Content-Disposition',
-# 						'attachment',
-# 						filename=os.path.basename(tl)
-# 					)
-# 					msg.attach(att)
+			# Add base text
+			txt = email.mime.text.MIMEText(body)
+			msg.attach(txt)
 
-# 			# Send the message
-# 			smtp = smtplib.SMTP(timeout=300)
-# 			if self.s.smtphost:
-# 				smtp.connect(s.smtphost)
-# 			else:
-# 				smtp.connect()
-# 			if self.s.smtpuser or self.s.smtppass:
-# 				smtp.login(s.smtpuser, self.s.smtppass)
-# 			smtp.sendmail(m_from, self.s.mailto, msg.as_string())
-# 			smtp.quit()
+			# Add attachments
+			for tl in attachments:
+				if tl:
+					TL = open(tl, 'rb')
+					if self.s.compresslog:
+						att = email.mime.application.MIMEApplication(TL.read(),'gzip')
+					else:
+						att = email.mime.text.MIMEText(TL.read(),'plain','utf-8')
+					TL.close()
+					att.add_header(
+						'Content-Disposition',
+						'attachment',
+						filename=os.path.basename(tl)
+					)
+					msg.attach(att)
+
+			# Send the message
+			smtp = smtplib.SMTP(timeout=300)
+			if self.s.smtphost:
+				smtp.connect(self.s.smtphost)
+			else:
+				smtp.connect()
+			if self.s.smtpuser or self.s.smtppass:
+				smtp.login(self.s.smtpuser, self.s.smtppass)
+			smtp.sendmail(m_from, self.s.mailto, msg.as_string())
+			smtp.quit()
 
 class ConfigurationError(Exception):
 	''' Simple exception raised when there is a configuration error '''
@@ -178,8 +206,9 @@ class SubProcessCommThread(threading.Thread):
 
 	def run(self):
 		while True:
-			text = self._stream.read()#.decode('utf-8')
-			if text == '':
+			text = self._stream.read()
+			print(text)
+			if text == b'':
 				break
 			self._processText(text)
 
@@ -234,6 +263,8 @@ class BackupSet:
 		self.cacheDir = cacheDir
 
 		self.name = name
+		self.hostname = socket.getfqdn()
+		self.username = getpass.getuser()
 
 		## List of folders to be backed up
 		self.backupList = config.getList('BackupList')
@@ -322,8 +353,8 @@ class BackupSet:
 
 	def run(self):
 		# Setup mailer
-		#mailer = JabsMailer(self)
-		#mailer.sendStartedEmail()
+		mailer = JabsMailer(self)
+		mailer.sendStartedEmail()
 
 		sstarttime = datetime.datetime.now()
 
@@ -541,11 +572,11 @@ class BackupSet:
 				self.logger.debug("Writing last backup timestamp")
 
 				# Create cachedir if missing
-				if not os.path.exists(self.cachedir):
+				if not os.path.exists(self.cacheDir):
 					# 448 corresponds to octal 0700 and is both python 2 and 3 compatible
-					os.makedirs(self.cachedir, 448)
+					os.makedirs(self.cacheDir, 448)
 
-				cachefile = self.cachedir + os.sep + self.name
+				cachefile = self.cacheDir + os.sep + self.name
 				CACHEFILE = open(cachefile,'w')
 				CACHEFILE.write(str(int(mktime(self.startTime.timetuple())))+"\n")
 				CACHEFILE.close()
@@ -584,9 +615,6 @@ class BackupSet:
 				if ret != 0:
 					self.logger.warning("Umount of %s failed with return code %s", self.umount, ret)
 
-		# Send backup completed email
-		#mailer.sendCompletedEmail(tarlogs)
-
 		# Delete temporary logs, if any
 		for tl in tarlogs:
 			if tl:
@@ -600,6 +628,9 @@ class BackupSet:
 			os.unlink(tmpfile)
 		if tmpdir:
 			os.rmdir(tmpdir)
+
+		# Send backup completed email
+		mailer.sendCompletedEmail(tarlogs, setsuccess)
 
 
 class Jabs:
