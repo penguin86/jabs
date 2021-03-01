@@ -70,7 +70,8 @@ VERSION = '2.0-pre-aplha'
 DESCRIPTION = 'Just Another Backup Script'
 DEFAULT_CONFIG = {
 	'configfile': '/etc/jabs/jabs.cfg',
-	'pidfile': '/var/run/jabs.pid',
+	#'pidfile': '/var/run/jabs.pid',
+	'pidfile': '/home/danieleverducci/Downloads/jabstest/jabs.pid',
 	'cachedir': '/var/cache/jabs',
 }
 
@@ -177,7 +178,7 @@ class SubProcessCommThread(threading.Thread):
 
 	def run(self):
 		while True:
-			text = file.readline(self._stream)
+			text = self._stream.read()#.decode('utf-8')
 			if text == '':
 				break
 			self._processText(text)
@@ -206,7 +207,7 @@ class SubProcessCommStderrThread(SubProcessCommThread):
 		self.output = ''
 
 	def _processText(self, text):
-		self.output += text
+		self.output += text.decode('utf-8')
 
 class BackupSet:
 	''' Represents a single backup set '''
@@ -219,15 +220,18 @@ class BackupSet:
 	RISREMOTE = re.compile('(.*@.*):{1,2}(.*)')
 	RLSPARSER = re.compile('^([^\s]+)\s+([0-9]+)\s+([^\s]+)\s+([^\s]+)\s+([0-9]+)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}\s[0-9]{2}:[0-9]{2})\s+(.+)$')
 
-	def __init__(self, name, config, startTime):
+	def __init__(self, name, config, startTime, safe, cacheDir):
 		''' Reads the config section and inits the backup set
 		@params name Backupset name
 		@params config Configuration obtained from config file
 		@params startTime Start time of the entire set
+		@params safe Boolean true if the backup should only be simulated without writing to disk
 		@throws ConfigurationError
 		'''
 		self.logger = logging.getLogger('jabs.backupset')
 		self.startTime = startTime
+		self.safe = safe
+		self.cacheDir = cacheDir
 
 		self.name = name
 
@@ -242,9 +246,9 @@ class BackupSet:
 		## Rsync command line options
 		self.rsyncOpts = config.getList('RSYNC_OPTS')
 		## Source folder/path to read from
-		self.src = config.getPath('SRC')
+		self.src = config.getStr('SRC')
 		## Destination folder/path to backup to
-		self.dst = config.getPath('DST')
+		self.dst = config.getStr('DST')
 		## Sleep tinterval in seconds between every dir
 		self.sleep = config.getInt('SLEEP', 0)
 		## Number of sets to use for Hanoi rotation (0=disabled)
@@ -282,11 +286,11 @@ class BackupSet:
 		## Whether to skip the backup if a pre-task fails
 		self.skipOnPreError = config.getBool('SKIPONPREERROR', True)
 		## Email server connection data
-		self.smtphost = config.getstr('SMTPHOST', self.name, None)
-		self.smtpuser = config.getstr('SMTPUSER', self.name, None)
-		self.smtppass = config.getstr('SMTPPASS', self.name, None)
+		self.smtphost = config.getStr('SMTPHOST', self.name, None)
+		self.smtpuser = config.getStr('SMTPUSER', self.name, None)
+		self.smtppass = config.getStr('SMTPPASS', self.name, None)
 		## Compress logs
-		self.compresslog = config.getstr('COMPRESSLOG', self.name, True)
+		self.compresslog = config.getStr('COMPRESSLOG', self.name, True)
 		## Remove source/dest
 		self.remsrc = self.RISREMOTE.match(self.src)
 		self.remdst = self.RISREMOTE.match(self.dst)
@@ -316,7 +320,7 @@ class BackupSet:
 			desc += "\n- {}: {}".format(k, v)
 		return desc
 
-	def run(self, safe, cachedir):
+	def run(self):
 		# Setup mailer
 		#mailer = JabsMailer(self)
 		#mailer.sendStartedEmail()
@@ -340,7 +344,7 @@ class BackupSet:
 		tmpdir = tempfile.mkdtemp()
 		tmpfile = None
 		if self.dateFile:
-			if safe:
+			if self.safe:
 				self.logger.info("Skipping creation of datefile %s", self.dateFile)
 			else:
 				tmpfile = tmpdir + "/" + self.dateFile
@@ -447,7 +451,7 @@ class BackupSet:
 				tarlogfile = tmpdir + '/' + re.sub(r'(\/|\.)', '_', self.name + '-' + d) + '.log'
 				if self.compresslog:
 					tarlogfile += '.gz'
-			if not safe:
+			if not self.safe:
 				tarlogs.append(tarlogfile)
 
 			#Build command line
@@ -470,13 +474,13 @@ class BackupSet:
 				cmd.extend(cmdn)
 			cmd.extend(cmdr)
 
-			if safe:
+			if self.safe:
 				self.logger.info("Commandline: %s", cmd)
 			else:
 				self.logger.debug("Commandline: %s", cmd)
 			self.logger.debug("Will write tar STDOUT to %s", tarlogfile)
 
-			if not safe:
+			if not self.safe:
 				# Execute the backup
 				sys.stdout.flush()
 				if self.compresslog:
@@ -516,7 +520,7 @@ class BackupSet:
 						self.logger.warning("stderr was not empty (but no errors detected): %s", spect.output)
 
 			if self.sleep > 0:
-				if safe:
+				if self.safe:
 					self.logger.info("Should sleep %d secs now, skipping.", self.sleep)
 				else:
 					self.logger.info("Sleeping %d secs", self.sleep)
@@ -531,17 +535,17 @@ class BackupSet:
 
 		# Save last backup execution time
 		if self.interval and self.interval > datetime.timedelta(seconds=0):
-			if safe:
+			if self.safe:
 				self.logger.info("Skipping write of last backup timestamp")
 			else:
 				self.logger.debug("Writing last backup timestamp")
 
 				# Create cachedir if missing
-				if not os.path.exists(cachedir):
+				if not os.path.exists(self.cachedir):
 					# 448 corresponds to octal 0700 and is both python 2 and 3 compatible
-					os.makedirs(cachedir, 448)
+					os.makedirs(self.cachedir, 448)
 
-				cachefile = cachedir + os.sep + self.name
+				cachefile = self.cachedir + os.sep + self.name
 				CACHEFILE = open(cachefile,'w')
 				CACHEFILE.write(str(int(mktime(self.startTime.timetuple())))+"\n")
 				CACHEFILE.close()
@@ -549,18 +553,18 @@ class BackupSet:
 		# Create backup symlink, is using hanoi and not remote
 		if len(hanoisuf)>0 and not self.remdst:
 			if os.path.exists(self.dst) and S_ISLNK(os.lstat(self.dst)[ST_MODE]):
-				if safe:
+				if self.safe:
 					self.logger.info("Skipping deletion of old symlink %s", self.dst)
 				else:
 					self.logger.info("Deleting old symlink %s", self.dst)
 					os.unlink(self.dst)
 			if not os.path.exists(self.dst):
-				if safe:
+				if self.safe:
 					self.logger.info("Skipping creation of symlink %s to %s", self.dst, self.dst+self.sep+hanoisuf)
 				else:
 					self.logger.info("Creating symlink %s to %s", self.dst, self.dst+self.sep+hanoisuf)
 					os.symlink(self.dst+self.sep+hanoisuf, self.dst)
-			elif not safe:
+			elif not self.safe:
 				self.logger.warning("Can't create symlink %s a file with such name exists", self.dst)
 
 		stooktime = datetime.datetime.now() - sstarttime
@@ -641,7 +645,7 @@ class Jabs:
 			if name in sets.keys():
 				raise ConfigurationError('Duplicate definition for set "{}"'.format(name))
 
-			s = BackupSet(name, ConfigSection(self.config, name), startTime)
+			s = BackupSet(name, ConfigSection(self.config, name), startTime, safe, cacheDir)
 			self.log.debug('Loaded set: {}'.format(s))
 			sets[s.name] = s
 
@@ -677,6 +681,10 @@ class Jabs:
 				self.log.info('Nothing to do')
 				return
 
+			# Run the backup sets
+			for s in runSets:
+				s.run()
+
 	def __listSetsToRun(self, force=False, sets=None):
 		''' Returns list of sets to run
 		@param force if true, always execute sets regardless of the time
@@ -688,12 +696,13 @@ class Jabs:
 					raise RuntimeError('Unknown set: "{}"'.format(s))
 
 		# Determine which sets have to be run
+		activeSets = []
 		if sets is None:
 			activeSets = self.sets.values()
 		else:
 			activeSets = filter(lambda i: i.name in sets, self.sets.values())
 
-		self.log.info('Considering sets: ' + ', '.join(['"{}"'.format(x.name) for x in activeSets]))
+		#self.log.info('Considering sets: ' + ', '.join(['"{}"'.format(x.name) for x in activeSets]))
 
 		if force:
 			self.log.warning('Force option active: ignoring time constraints')
