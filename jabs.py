@@ -208,7 +208,6 @@ class SubProcessCommThread(threading.Thread):
 	def run(self):
 		while True:
 			text = self._stream.read()
-			print(text)
 			if text == b'':
 				break
 			self._processText(text)
@@ -313,6 +312,8 @@ Backup set: $backupset
 		ping = config.getBool('PING', False)
 		## Valid time range for starting this backup
 		self.runTime = config.getTimeRange('RUNTIME', self.ALLDAY)
+		## Wether to send a "backup started" email
+		self.startedMail = config.getList('STARTEDMAIL', None)
 		## List of email address to notify about backup status
 		self.mailto = config.getList('MAILTO', None)
 		## Sender address for the notification email
@@ -365,7 +366,8 @@ Backup set: $backupset
 	def run(self):
 		# Setup mailer
 		mailer = JabsMailer(self)
-		mailer.sendStartedEmail()
+		if self.startedMail == True:
+			mailer.sendStartedEmail()
 		# Register start time
 		sstarttime = datetime.datetime.now()
 		# Print header
