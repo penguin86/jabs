@@ -363,6 +363,15 @@ Backup set: $backupset
 			desc += "\n- {}: {}".format(k, v)
 		return desc
 
+	@staticmethod
+	def isSshUrl(url):
+		"""
+			Checks if the url is a local path or a remote (ssh etc...) path. It's the same method used by Rsync (from the Rsync doc):
+			"The remote-shell transport is used whenever the source or destination path contains a single colon (:) separator after a host specification."
+			@Param url String containing the url to check
+		"""
+		return ":" in url
+
 	def run(self):
 		# Setup mailer
 		mailer = JabsMailer(self)
@@ -487,15 +496,19 @@ Backup set: $backupset
 				return
 
 		if self.checkdst:
-			# Checks whether the given backup destination exists
-			try:
-				i = os.path.exists(self.dst)
-				if not i:
-					self.logger.warning("Skipping %s set, destination %s not found.", self.name, self.dst)
+			if self.isSshUrl(self.dst):
+				# Wrong configuration: alert user
+				self.logger.error("Wrong configuration for %s set: cannot CHECKDST for non-local DST %s", self.name, self.dst)
+			else:
+				# Checks whether the given backup destination exists
+				try:
+					i = os.path.exists(self.dst)
+					if not i:
+						self.logger.warning("Skipping %s set, destination %s not found.", self.name, self.dst)
+						return
+				except:
+					self.logger.warning("Skipping %s set, read error on %s.", self.name, self.dst)
 					return
-			except:
-				self.logger.warning("Skipping %s set, read error on %s.", self.name, self.dst)
-				return
 
 		for d in self.backupList:
 			self.logger.info("Backing up %s on %s...", d, self.name)
