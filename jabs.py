@@ -67,6 +67,7 @@ from email.mime.application import MIMEApplication
 from email.mime.text import MIMEText
 import smtplib
 from stat import S_ISDIR, S_ISLNK, ST_MODE
+from string import Template
 import configparser
 from io import StringIO
 
@@ -248,6 +249,16 @@ class BackupSet:
 	RDIR = re.compile('{dirname}')
 	RISREMOTE = re.compile('(.*@.*):{1,2}(.*)')
 	RLSPARSER = re.compile('^([^\s]+)\s+([0-9]+)\s+([^\s]+)\s+([^\s]+)\s+([0-9]+)\s+([0-9]{4}-[0-9]{2}-[0-9]{2}\s[0-9]{2}:[0-9]{2})\s+(.+)$')
+	BACKUPHEADER_TPL = Template("""
+-------------------------------------------------
+$name $version
+
+Backup of $hostname
+Backup date: $starttime
+Backup set: $backupset
+-------------------------------------------------
+
+		""")
 
 	def __init__(self, name, config, startTime, safe, cacheDir):
 		''' Reads the config section and inits the backup set
@@ -355,8 +366,17 @@ class BackupSet:
 		# Setup mailer
 		mailer = JabsMailer(self)
 		mailer.sendStartedEmail()
-
+		# Register start time
 		sstarttime = datetime.datetime.now()
+		# Print header
+		backupheader = self.BACKUPHEADER_TPL.substitute(
+			name = NAME,
+			version = VERSION,
+			hostname = self.hostname,
+			starttime = sstarttime.ctime(),
+			backupset = self.name,
+		)
+		self.logger.info(backupheader)
 
 		if self.mount:
 			if os.path.ismount(self.mount):
@@ -615,6 +635,9 @@ class BackupSet:
 				if ret != 0:
 					self.logger.warning("Umount of %s failed with return code %s", self.umount, ret)
 
+		# Send backup completed email
+		mailer.sendCompletedEmail(tarlogs, setsuccess)
+
 		# Delete temporary logs, if any
 		for tl in tarlogs:
 			if tl:
@@ -624,13 +647,10 @@ class BackupSet:
 
 		# Delete tmpfile, if created
 		if tmpfile and len(tmpfile):
-			self.logger.info("Deleting temporary files %s")
+			self.logger.info("Deleting temporary files %s", tmpfile)
 			os.unlink(tmpfile)
 		if tmpdir:
 			os.rmdir(tmpdir)
-
-		# Send backup completed email
-		mailer.sendCompletedEmail(tarlogs, setsuccess)
 
 
 class Jabs:
