@@ -76,8 +76,7 @@ VERSION = '2.0-pre-aplha'
 DESCRIPTION = 'Just Another Backup Script'
 DEFAULT_CONFIG = {
 	'configfile': '/etc/jabs/jabs.cfg',
-	#'pidfile': '/var/run/jabs.pid',
-	'pidfile': '/home/danieleverducci/Downloads/jabstest/jabs.pid',
+	'pidfile': '/var/run/jabs.pid',
 	'cachedir': '/var/cache/jabs',
 }
 
