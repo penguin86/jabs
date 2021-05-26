@@ -171,7 +171,11 @@ class JabsMailer():
 					msg.attach(att)
 
 			# Send the message
-			smtp = smtplib.SMTP(timeout=300)
+			if self.s.smtpssl and self.s.smtphost:
+				smtp = smtplib.SMTP_SSL(self.s.smtphost, timeout=300)
+			else:
+				smtp = smtplib.SMTP(timeout=300)
+
 			if self.s.smtphost:
 				smtp.connect(self.s.smtphost)
 			else:
@@ -331,6 +335,7 @@ Backup set: $backupset
 		self.smtphost = config.getStr('SMTPHOST', self.name, None)
 		self.smtpuser = config.getStr('SMTPUSER', self.name, None)
 		self.smtppass = config.getStr('SMTPPASS', self.name, None)
+		self.smtpssl = config.getBool('SMTPSSL', self.name, False)
 		## Compress logs
 		self.compresslog = config.getStr('COMPRESSLOG', self.name, True)
 		## Remove source/dest
