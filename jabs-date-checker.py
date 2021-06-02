@@ -72,7 +72,6 @@ class Main:
 		''' Runs the date checker '''
 		# Checks sets and snapshots them
 		for section in self.config:
-			self._log.info(section)
 			if section == 'DEFAULT':
 				continue
 
