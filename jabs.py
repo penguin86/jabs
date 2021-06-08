@@ -872,7 +872,7 @@ class ConfigSection:
 		if multi:
 			optnames = []
 			for option in self.config.options(self.name):
-				if option.lower().startswith(name.lower()+'_'):
+				if option.lower().startswith(name.lower()):
 					optnames.append(option)
 			if not optnames:
 				if default is NoDefault:
